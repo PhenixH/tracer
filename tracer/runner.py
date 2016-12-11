@@ -9,7 +9,7 @@ import resource
 import tempfile
 import subprocess
 import contextlib
-import shellphish_qemu
+
 
 from .tracerpov import TracerPoV
 from .tracer import TracerEnvironmentError, TracerInstallError
@@ -17,14 +17,14 @@ from .tinycore import TinyCore
 
 l = logging.getLogger("tracer.Runner")
 
-multicb_available = True
-
+multicb_available = False
+"""
 try:
     import shellphish_afl
 except ImportError:
     l.warning("Unable to import shellphish_afl, multicb tracing will be disabled")
     multicb_available = False
-
+"""
 class Runner(object):
     """
     Trace an angr path with a concrete input
@@ -172,29 +172,12 @@ class Runner(object):
             raise TracerEnvironmentError
 
         # try to find the install base
-        self.base = shellphish_qemu.qemu_base()
-        self._check_qemu_install()
+        self.base = "" #qemu to remove
+
         if self.forced_qemu != None:
             self.tracer_qemu_path = self.forced_qemu
         return True
 
-    def _check_qemu_install(self):
-        """
-        check the install location of qemu
-        """
-
-        if self.os == "cgc":
-            self.tracer_qemu = "shellphish-qemu-cgc-%s" % ("tracer" if self._record_trace else "base")
-
-        self.tracer_qemu_path = shellphish_qemu.qemu_path(self.tracer_qemu)
-
-        if not os.access(self.tracer_qemu_path, os.X_OK):
-            if os.path.isfile(self.tracer_qemu_path):
-                l.error("%s is not executable", self.tracer_qemu)
-                raise TracerEnvironmentError
-            else:
-                l.error("\"%s\" does not exist", self.tracer_qemu_path)
-                raise TracerEnvironmentError
 
 ### DYNAMIC TRACING
 

@@ -7,13 +7,14 @@ import claripy
 import simuvex
 import tempfile
 import subprocess
-import shellphish_qemu
 from .tracerpov import TracerPoV
 from .cachemanager import LocalCacheManager
 from .simprocedures import receive
 from .simprocedures import FixedOutTransmit, FixedInReceive, FixedRandom
 from simuvex import s_options as so
-
+import sys
+sys.path.append('../FrogAndFuzz/') # relative path to FrogAndFuzz, willbe removed lately
+import redis_com
 import logging
 
 l = logging.getLogger("tracer.Tracer")
@@ -42,7 +43,7 @@ class Tracer(object):
     Trace an angr path with a concrete input
     '''
 
-    def __init__(self, binary, input=None, pov_file=None, simprocedures=None,
+    def __init__(self, binname, binary, input=None, pov_file=None, simprocedures=None,
                  hooks=None, seed=None, preconstrain_input=True,
                  preconstrain_flag=True, resiliency=True, chroot=None,
                  add_options=None, remove_options=None, trim_history=True):
@@ -66,7 +67,7 @@ class Tracer(object):
             do tracing
         :param trim_history: Trim the history of a path.
         """
-
+        self.binname=binname
         self.binary = binary
         self.input = input
         self.pov_file = pov_file
@@ -131,12 +132,12 @@ class Tracer(object):
         self._p = angr.Project(self.binary)
 
         self.base = None
-        self.tracer_qemu = None
-        self.tracer_qemu_path = None
+        #self.tracer_qemu = None
+        #self.tracer_qemu_path = None
         self._setup()
 
         l.debug("accumulating basic block trace...")
-        l.debug("self.tracer_qemu_path: %s", self.tracer_qemu_path)
+        #l.debug("self.tracer_qemu_path: %s", self.tracer_qemu_path)
 
         # does the input cause a crash?
         self.crash_mode = False
@@ -599,37 +600,15 @@ class Tracer(object):
             raise TracerEnvironmentError
 
         # try to find the install base
-        self.base = shellphish_qemu.qemu_base()
 
-        try:
-            self._check_qemu_install()
-        except TracerEnvironmentError:
-            self.base = os.path.join(self.base, "..", "..")
-            self._check_qemu_install()
+        self.base = ""
+
 
         return True
 
-    def _check_qemu_install(self):
-        '''
-        check the install location of qemu
-        '''
 
-        if self.os == "cgc":
-            self.tracer_qemu = "shellphish-qemu-cgc-tracer"
-            qemu_platform = 'cgc-tracer'
-        elif self.os == "unix":
-            self.tracer_qemu = "shellphish-qemu-linux-%s" % self._p.arch.qemu_name
-            qemu_platform = self._p.arch.qemu_name
 
-        self.tracer_qemu_path = shellphish_qemu.qemu_path(qemu_platform)
 
-        if not os.access(self.tracer_qemu_path, os.X_OK):
-            if os.path.isfile(self.tracer_qemu_path):
-                l.error("tracer-qemu-cgc is not executable")
-                raise TracerEnvironmentError
-            else:
-                l.error("\"%s\" does not exist", self.tracer_qemu_path)
-                raise TracerEnvironmentError
 
     def _cache_lookup(self):
 
@@ -664,84 +643,15 @@ class Tracer(object):
 
     def dynamic_trace(self, stdout_file=None):
         '''
-        accumulate a basic block trace using qemu
+        accumulate a basic block trace using sancov file
         '''
+        red=redis_com.connect_redis()
+        sancov=redis_com.get_SancovData(self.binname,red)
+        print sancov
+        addrs = [int(v.replace("'",""), 16)
+                 for v in sancov.split(',')
+                 ]
 
-        lname = tempfile.mktemp(dir="/dev/shm/", prefix="tracer-log-")
-        args = [self.tracer_qemu_path]
-
-        if self.seed is not None:
-            args += ["-seed", self.seed]
-
-        # if the binary is CGC we'll also take this oppurtunity to read in the magic page
-        if self.os == 'cgc':
-            mname = tempfile.mktemp(dir="/dev/shm/", prefix="tracer-magic-")
-            args += ["-magicdump", mname]
-
-        args += ["-d", "exec", "-D", lname, self.binary]
-
-        with open('/dev/null', 'wb') as devnull:
-            stdout_f = devnull
-            if stdout_file is not None:
-                stdout_f = open(stdout_file, 'wb')
-
-            # we assume qemu with always exit and won't block
-            if self.pov_file is None:
-                l.info("tracing as raw input")
-                p = subprocess.Popen(
-                        args,
-                        stdin=subprocess.PIPE,
-                        stdout=stdout_f,
-                        stderr=devnull)
-                _, _ = p.communicate(self.input)
-            else:
-                l.info("tracing as pov file")
-                in_s, out_s = socket.socketpair()
-                p = subprocess.Popen(
-                        args,
-                        stdin=in_s,
-                        stdout=stdout_f,
-                        stderr=devnull)
-
-                for write in self.pov_file.writes:
-                    out_s.send(write)
-                    time.sleep(.01)
-
-            ret = p.wait()
-            # did a crash occur?
-            if ret < 0:
-                if abs(ret) == signal.SIGSEGV or abs(ret) == signal.SIGILL:
-                    l.info("input caused a crash (signal %d)\
-                            during dynamic tracing", abs(ret))
-                    l.info("entering crash mode")
-                    self.crash_mode = True
-
-            if stdout_file is not None:
-                stdout_f.close()
-
-        with open(lname, 'rb') as f:
-            trace = f.read()
-
-        addrs = [int(v.split('[')[1].split(']')[0], 16)
-                 for v in trace.split('\n')
-                 if v.startswith('Trace')]
-
-        # grab the faulting address
-        if self.crash_mode:
-            self.crash_addr = int(
-                    trace.split('\n')[-2].split('[')[1].split(']')[0],
-                    16)
-
-        if self.os == "cgc":
-            with open(mname) as f:
-                self._magic_content = f.read()
-
-            a_mesg = "magic content read from QEMU improper size, should be a page in length"
-            assert len(self._magic_content) == 0x1000, a_mesg
-
-            os.remove(mname)
-
-        os.remove(lname)
 
         return addrs
 
