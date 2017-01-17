@@ -1,6 +1,6 @@
 cle
 angr
 simuvex
-shellphish-qemu
-shellphish-afl
-topsecret
+git+https://github.com/PhenixH/shellphish-qemu.git#egg=shellphish-qemu
+
+
